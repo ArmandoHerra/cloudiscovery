@@ -338,7 +338,7 @@ def all_exception(func):
             return func(*args, **kwargs)
         # pylint: disable=broad-except
         except Exception as e:
-            if func.__qualname__ == "AllResources.analyze_operation":
+            if func.__qualname__ == "AllResources.fetch_operation_data":
                 if not args[0].options.verbose:
                     return
                 exception_str = str(e)
@@ -433,6 +433,10 @@ def flatten(d, parent_key="", sep="."):
     return dict(items)
 
 
+def is_array_of_strs(array):
+    return len(array) > 0 and isinstance(array[0], str)
+
+
 class AllResources(ResourceProvider):
     def __init__(self, options: AllOptions):
         """
@@ -509,36 +513,56 @@ class AllResources(ResourceProvider):
                 or name.startswith("Get")
                 or name.startswith("Describe")
             ):
-                has_paginator = name in paginators_model["pagination"]
-                if "input" in operation:
-                    input_model = service_model["shapes"][operation["input"]["shape"]]
-                    if "required" in input_model and input_model["required"]:
-                        continue
-                    if (
-                        aws_service in REQUIRED_PARAMS_OVERRIDE
-                        and operation["name"] in REQUIRED_PARAMS_OVERRIDE[aws_service]
-                    ):
-                        continue
-                resource_type = build_resource_type(aws_service, name)
-                if resource_type in OMITTED_RESOURCES:
-                    continue
-                if not operation_allowed(allowed_actions, aws_service, name):
-                    continue
-                analyze_operation = self.analyze_operation(
-                    resource_type,
+                analyze_operation_result = self.analyze_operation(
                     name,
-                    has_paginator,
+                    operation,
+                    paginators_model,
+                    service_model,
+                    allowed_actions,
                     client,
                     service_full_name,
                     aws_service,
                 )
-                if analyze_operation is not None:
-                    resources.extend(analyze_operation)
+                if analyze_operation_result is not None:
+                    resources.extend(analyze_operation_result)
         return resources
 
     @all_exception
     # pylint: disable=too-many-locals,too-many-arguments
     def analyze_operation(
+        self,
+        name,
+        operation,
+        paginators_model,
+        service_model,
+        allowed_actions,
+        client,
+        service_full_name,
+        aws_service,
+    ) -> List[Resource]:
+        has_paginator = name in paginators_model["pagination"]
+        if "input" in operation:
+            input_model = service_model["shapes"][operation["input"]["shape"]]
+            if "required" in input_model and input_model["required"]:
+                return []
+            if (
+                aws_service in REQUIRED_PARAMS_OVERRIDE
+                and operation["name"] in REQUIRED_PARAMS_OVERRIDE[aws_service]
+            ):
+                return []
+        # TODO: if input it's list and requires a list of stings, check for list/describe/get endpoints
+        resource_type = build_resource_type(aws_service, name)
+        if resource_type in OMITTED_RESOURCES:
+            return []
+        if not operation_allowed(allowed_actions, aws_service, name):
+            return []
+        return self.fetch_operation_data(
+            resource_type, name, has_paginator, client, service_full_name, aws_service,
+        )
+
+    @all_exception
+    # pylint: disable=too-many-locals,too-many-arguments
+    def fetch_operation_data(
         self,
         resource_type,
         operation_name,
@@ -597,7 +621,6 @@ class AllResources(ResourceProvider):
                     if resource is not None:
                         resources.append(resource)
         else:
-
             response = getattr(client, snake_operation_name)()
             for response_elem in response.values():
                 if isinstance(response_elem, list):
